@@ -1,1 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Arcane Indexer</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom D&D-inspired theme colors */
+        :root {
+            --color-bg-dark: #1f2937; /* Dark slate */
+            --color-bg-card: #374151; /* Darker card */
+            --color-text-light: #f3f4f6; /* Off-white */
+            --color-accent: #f59e0b; /* Gold/Amber */
+            --color-border: #4b5563;
+        }
+
+        body {
+            background-color: var(--color-bg-dark);
+            color: var(--color-text-light);
+            font-family: 'Inter', sans-serif;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        /* Spell detail scrollbar styling */
+        #spell-detail::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        #spell-detail::-webkit-scrollbar-thumb {
+            background-color: var(--color-accent);
+            border-radius: 4px;
+        }
+
+        #spell-detail::-webkit-scrollbar-track {
+            background-color: var(--color-bg-card);
+        }
+
+        /* Spell name glow effect */
+        .spell-list-item:hover .spell-name-text {
+            color: var(--color-accent);
+            text-shadow: 0 0 5px rgba(245, 158, 11, 0.7);
+        }
+
+        /* Loading Spinner Animation */
+        .spinner {
+            border: 4px solid var(--color-border);
+            border-top: 4px solid var(--color-accent);
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div id="app" class="w-full max-w-4xl grid grid-cols-1 md:grid-cols-3 gap-6">
+
+        <!-- Column 1 & 2: Search and Results -->
+        <div class="md:col-span-1 lg:col-span-1 flex flex-col space-y-4">
+            <h1 class="text-3xl font-bold text-center text-gray-100 mb-2 tracking-wider">The Arcane Indexer</h1>
+
+            <!-- Search Input -->
+            <input type="text" id="spell-search" placeholder="Search spell names..."
+                   class="w-full p-3 rounded-lg bg-gray-700 text-white border-2 border-gray-600 focus:border-yellow-500 focus:ring-2 focus:ring-yellow-500 transition shadow-lg"
+                   oninput="handleSearch()">
+
+            <!-- Results List -->
+            <div id="spell-results" class="bg-gray-800 p-4 rounded-xl shadow-2xl flex-grow overflow-y-auto" style="height: 60vh; max-height: 800px;">
+                <!-- Loading State -->
+                <div id="loading-indicator" class="flex justify-center items-center h-full hidden">
+                    <div class="spinner"></div>
+                </div>
+                <!-- Error State -->
+                <p id="error-message" class="text-red-400 text-center hidden">
+                    Could not fetch spell list. Please check your connection.
+                </p>
+                <!-- Search Results will be rendered here -->
+                <p id="initial-message" class="text-gray-400 text-center mt-8">
+                    Start typing to search through the spell compendium!
+                </p>
+            </div>
+        </div>
+
+        <!-- Column 3: Spell Detail Panel -->
+        <div class="md:col-span-2 lg:col-span-2">
+            <div id="spell-detail" class="bg-gray-800 p-6 rounded-xl shadow-2xl border-t-4 border-yellow-500 overflow-y-auto" style="height: 80vh; max-height: 800px;">
+                <p class="text-gray-400 text-center mt-8">
+                    Select a spell from the list to view its complete details here.
+                </p>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        const API_BASE_URL = 'https://www.dnd5eapi.co';
+        const ALL_SPELLS_ENDPOINT = `${API_BASE_URL}/api/spells`;
+
+        let allSpells = []; // Stores the master list of all spells (name and index)
+        const spellCache = {}; // Cache for full spell details
+        let searchTimeout = null;
+
+        const resultsContainer = document.getElementById('spell-results');
+        const detailContainer = document.getElementById('spell-detail');
+        const loadingIndicator = document.getElementById('loading-indicator');
+        const errorMessage = document.getElementById('error-message');
+        const initialMessage = document.getElementById('initial-message');
+
+        // --- Core Utility: API Fetch with Exponential Backoff ---
+
+        /**
+         * Fetches data from a URL with an exponential backoff retry mechanism.
+         * @param {string} url The API endpoint URL.
+         * @param {number} maxRetries Maximum number of retries.
+         * @returns {Promise<object>} The parsed JSON data.
+         */
+        async function fetchWithRetry(url, maxRetries = 3) {
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    // console.debug(`Attempt ${i + 1}: Fetching ${url}`);
+                    const response = await fetch(url);
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! Status: ${response.status}`);
+                    }
+                    return await response.json();
+                } catch (error) {
+                    console.error(`Fetch attempt ${i + 1} failed for ${url}:`, error);
+                    if (i === maxRetries - 1) {
+                        throw new Error("Failed to fetch data after multiple retries.");
+                    }
+                    // Exponential backoff delay (2^i seconds + jitter)
+                    const delay = Math.pow(2, i) * 1000 + Math.random() * 500;
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+            }
+        }
+
+        // --- Game/App Initialization ---
+
+        async function init() {
+            loadingIndicator.classList.remove('hidden');
+            initialMessage.classList.add('hidden');
+            errorMessage.classList.add('hidden');
+
+            try {
+                // 1. Fetch the master list of all spell names/indices
+                const data = await fetchWithRetry(ALL_SPELLS_ENDPOINT);
+                allSpells = data.results.sort((a, b) => a.name.localeCompare(b.name));
+                console.log(`Loaded ${allSpells.length} spells.`);
+
+                // 2. Display the initial list (first 50)
+                renderResults(allSpells.slice(0, 50));
+            } catch (error) { // <-- FIX: Added {
+                console.error("Initialization Error:", error);
+                errorMessage.classList.remove('hidden');
+            } finally { // <-- FIX: Added }
+                loadingIndicator.classList.add('hidden');
+                document.getElementById('spell-search').disabled = false;
+            }
+        }
+
+        // --- Search and Filtering Logic ---
+
+        function handleSearch() {
+            clearTimeout(searchTimeout);
+            
+            // Debounce the search input for performance
+            searchTimeout = setTimeout(() => {
+                const query = document.getElementById('spell-search').value.toLowerCase().trim();
+                
+                if (query.length < 2) {
+                    // Display initial subset if query is short
+                    renderResults(allSpells.slice(0, 50));
+                    initialMessage.textContent = "Start typing to search through the spell compendium!";
+                    initialMessage.classList.remove('hidden');
+                    return;
+                }
+
+                initialMessage.classList.add('hidden');
+
+                const filteredSpells = allSpells.filter(spell => 
+                    spell.name.toLowerCase().includes(query)
+                );
+                
+                renderResults(filteredSpells);
+
+            }, 250); // 250ms debounce
+        }
+
+        function renderResults(spells) {
+            resultsContainer.innerHTML = ''; // Clear previous results
+
+            if (spells.length === 0) {
+                resultsContainer.innerHTML = '<p class="text-center text-gray-400 mt-4">No spells found matching your query.</p>';
+                return;
+            }
+
+            spells.forEach(spell => {
+                const li = document.createElement('div');
+                li.className = 'spell-list-item cursor-pointer p-2 my-1 rounded-lg hover:bg-gray-700 transition duration-150 ease-in-out border-b border-gray-700';
+                li.setAttribute('data-index', spell.index);
+                li.onclick = () => fetchSpellDetails(spell.index);
+
+                // Split name and level for better display
+                const nameSpan = document.createElement('span');
+                nameSpan.className = 'spell-name-text font-semibold text-lg';
+                nameSpan.textContent = spell.name;
+
+                li.appendChild(nameSpan);
+                resultsContainer.appendChild(li);
+            });
+        }
+
+        // --- Detail Fetching and Rendering ---
+
+        async function fetchSpellDetails(index) {
+            detailContainer.innerHTML = '<div class="flex justify-center items-center h-full"><div class="spinner"></div></div>'; // Show loading spinner
+
+            if (spellCache[index]) {
+                renderSpellDetails(spellCache[index]);
+                return;
+            }
+
+            try {
+                // <-- FIX: Corrected the API endpoint URL
+                const url = `${ALL_SPELLS_ENDPOINT}/${index}`; 
+                const spellData = await fetchWithRetry(url);
+                spellCache[index] = spellData; // Cache the result
+                renderSpellDetails(spellData);
+            } catch (error) {
+                detailContainer.innerHTML = `<p class="text-red-400 text-center mt-8">Error loading details for ${index.toUpperCase()}.</p>`;
+                console.error("Detail Fetch Error:", error);
+            }
+        }
+
+        function renderSpellDetails(spell) {
+            const detailHtml = `
+                <h2 class="text-4xl font-serif text-yellow-500 mb-2 tracking-wider">${spell.name}</h2>
+                <p class="text-gray-300 mb-4 text-xl font-medium">${getOrdinal(spell.level)} Level ${spell.school.name}</p>
+                <hr class="border-yellow-700 mb-4">
+                
+                <!-- Key Attributes Table -->
+                <div class="grid grid-cols-2 gap-4 text-sm mb-6">
+                    ${detailRow('Casting Time', spell.casting_time)}
+                    ${detailRow('Range', spell.range)}
+                    ${detailRow('Components', spell.components.join(', ') + (spell.material ? ' (' + spell.material + ')' : ''))}
+                    ${detailRow('Duration', spell.duration)}
+                    ${detailRow('Concentration', spell.concentration ? 'Yes' : 'No')}
+                    ${detailRow('Ritual', spell.ritual ? 'Yes' : 'No')}
+                </div>
+
+                <!-- Description -->
+                <div class="space-y-4 mb-6 text-gray-300">
+                    ${spell.desc.map(p => `<p class="leading-relaxed">${p}</p>`).join('')}
+                </div>
+
+                <!-- Higher Level (if present) -->
+                ${spell.higher_level ? `
+                    <div class="bg-gray-700 p-4 rounded-lg border-l-4 border-yellow-600">
+                        <h3 class="font-semibold text-yellow-500 mb-1">At Higher Levels</h3>
+                        <p class="text-sm text-gray-300">${spell.higher_level.join('<br>')}</p>
+                    </div>
+                ` : ''}
+
+                <!-- Classes -->
+                <div class="mt-6">
+                    <h3 class="font-semibold text-xl text-yellow-500 mb-2">Classes</h3>
+                    <p class="text-sm">${spell.classes.map(c => `<span class="inline-block bg-gray-700 text-yellow-300 px-3 py-1 rounded-full mr-2 mb-2">${c.name}</span>`).join('')}</p>
+                </div>
+            `;
+            detailContainer.innerHTML = detailHtml;
+            detailContainer.scrollTop = 0; // Scroll to top when new spell is displayed
+        }
+
+        // Helper for generating attribute rows
+        function detailRow(label, value) {
+            return `
+                <div class="p-2 bg-gray-700 rounded-md">
+                    <span class="font-bold text-yellow-400">${label}:</span> ${value} <!-- <-- FIX: Added = -->
+                </div>
+            `;
+        }
+        
+        // Helper for displaying ordinal numbers (1st, 2nd, 3rd, etc.)
+        function getOrdinal(n) {
+            if (n === 0) return 'Cantrip';
+            const s = ["th", "st", "nd", "rd"],
+                v = n % 100;
+            return n + (s[(v - 20) % 10] || s[v] || s[0]);
+        }
+
+        // Run initialization on load
+        window.onload = init;
+
+    </script>
+</body>
+</html>
+
+
 
